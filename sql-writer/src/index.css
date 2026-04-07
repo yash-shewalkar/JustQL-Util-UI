@@ -49,6 +49,13 @@
     filter: invert(1) brightness(2);
   }
 }
+html, body, #root {
+  height: 100%;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  background: #0e1117;
+}
 
 #root {
   width: 1126px;

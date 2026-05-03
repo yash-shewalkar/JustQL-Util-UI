@@ -1,20 +1,21 @@
-import React, { useEffect, useRef, useState, useCallback } from "react";
+"use client";
+import React, { useState, useRef, useCallback } from 'react';
+import Editor, { type OnMount } from '@monaco-editor/react';
+import type * as monacoEditor from 'monaco-editor';
 
 const API_URL = "http://localhost:5000/suggest";
 
-const App: React.FC = () => {
-  const [schema, setSchema] = useState("");
-  const [query, setQuery] = useState("");
-  const [suggestion, setSuggestion] = useState("");
+const JustQLCopilot: React.FC = () => {
+  const [schema, setSchema] = useState("-- Define schema here\nCREATE TABLE users (id INT, name TEXT);");
+  const [query, setQuery] = useState("SELECT ");
+  
+  // Ref to store the latest suggestion for the provider to access
+  const latestSuggestionRef = useRef("");
 
-  const inputRef = useRef<HTMLTextAreaElement | null>(null);
-  const ghostRef = useRef<HTMLTextAreaElement | null>(null);
-
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // ---------- API ----------
-  const fetchSuggestion = useCallback(async () => {
-    if (!query || query.trim().length < 3) {
-      setSuggestion("");
+  // ---------- API FETCH LOGIC ----------
+  const fetchSuggestion = useCallback(async (currentQuery: string) => {
+    if (!currentQuery || currentQuery.trim().length < 3) {
+      latestSuggestionRef.current = "";
       return;
     }
 
@@ -22,199 +23,131 @@ const App: React.FC = () => {
       const res = await fetch(API_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ schema, query }),
+        body: JSON.stringify({ schema, query: currentQuery }),
       });
-
       const data = await res.json();
-      setSuggestion(data.suggestion || "");
+      latestSuggestionRef.current = data.suggestion || "";
     } catch (err) {
       console.error("Fetch error:", err);
-      setSuggestion("");
+      latestSuggestionRef.current = "";
     }
-  }, [schema, query]);
+  }, [schema]);
 
-  // ---------- DEBOUNCE ----------
-  useEffect(() => {
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(fetchSuggestion, 300);
+  // ---------- EDITOR MOUNT HANDLER ----------
+  const handleEditorDidMount: OnMount = (_editor, monaco) => {
+    monaco.languages.registerInlineCompletionsProvider('sql', {
+    provideInlineCompletions: async (
+      model: monacoEditor.editor.ITextModel,
+      position: monacoEditor.Position,
+    ) => {
+      const textBeforeCursor = model.getValueInRange({
+        startLineNumber: 1,
+        startColumn: 1,
+        endLineNumber: position.lineNumber,
+        endColumn: position.column,
+      });
 
-    return () => {
-      if (debounceRef.current) clearTimeout(debounceRef.current);
-    };
-  }, [query, fetchSuggestion]);
+      await fetchSuggestion(textBeforeCursor);
 
-  // ---------- SCROLL SYNC ----------
-  const handleScroll = () => {
-    if (ghostRef.current && inputRef.current) {
-      ghostRef.current.scrollTop = inputRef.current.scrollTop;
-      ghostRef.current.scrollLeft = inputRef.current.scrollLeft;
-    }
-  };
+      // CHANGE: 'let' to 'const' to fix your linting error
+      const rawSuggestion = latestSuggestionRef.current;
+      if (!rawSuggestion) return { items: [] };
 
-  // ---------- TAB HANDLER ----------
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Tab") {
-      const queryLower = query.toLowerCase();
-      const suggestionLower = suggestion.toLowerCase();
-
-      if (suggestion && suggestionLower.startsWith(queryLower)) {
-        e.preventDefault();
-
-        const newQuery = suggestion;
-        setQuery(newQuery);
-        setSuggestion("");
-
-        setTimeout(() => {
-          if (inputRef.current) {
-            inputRef.current.selectionStart = newQuery.length;
-            inputRef.current.selectionEnd = newQuery.length;
-          }
-        }, 0);
+      // 1. Calculate the base insert text
+      let insertText = rawSuggestion;
+      if (rawSuggestion.toLowerCase().startsWith(textBeforeCursor.toLowerCase())) {
+        insertText = rawSuggestion.substring(textBeforeCursor.length);
       }
-    }
-  };
 
-  // ---------- GHOST TEXT ----------
-  const getGhostText = () => {
-    const queryLower = query.toLowerCase();
-    const suggestionLower = suggestion.toLowerCase();
+      // 2. Space Logic: Add a space if the user is at the end of a word 
+      // and the suggestion doesn't already have one.
+      const lastChar = textBeforeCursor.slice(-1);
+      const isCursorAtEndOfWord = lastChar !== "" && !/\s/.test(lastChar);
+      const suggestionNeedsSpace = !insertText.startsWith(" ");
 
-    if (suggestion && suggestionLower.startsWith(queryLower)) {
-      return query + suggestion.slice(query.length);
-    }
-    return query;
+      if (isCursorAtEndOfWord && suggestionNeedsSpace && insertText.length > 0) {
+        insertText = " " + insertText;
+      }
+
+      return {
+        items: [
+          {
+            insertText: insertText,
+            range: {
+              startLineNumber: position.lineNumber,
+              startColumn: position.column,
+              endLineNumber: position.lineNumber,
+              endColumn: position.column,
+            },
+          },
+        ],
+      };
+    },
+      // 4. Added as required by your reference's type definitions
+      freeInlineCompletions: () => {},
+    });
   };
 
   return (
-    <div style={styles.body}>
-      <div style={styles.container}>
-        <h1>✍️ Real-Time SQL Writer</h1>
+    <div style={styles.container}>
+      <header style={styles.header}>
+        <h1 style={{ color: "#fafafa" }}>JustQL AI Editor</h1>
+      </header>
 
-        <div style={styles.grid}>
-          {/* LEFT */}
-          <div>
-            <label style={styles.label}>1. Define Schema</label>
-            <textarea
-              style={styles.textarea}
+      <div style={styles.grid}>
+        {/* Schema Editor */}
+        <section>
+          <label style={styles.label}>Database Schema</label>
+          <div style={styles.editorWrapper}>
+            <Editor
+              height="150px"
+              defaultLanguage="sql"
+              theme="vs-dark"
               value={schema}
-              onChange={(e) => setSchema(e.target.value)}
-              placeholder="e.g., CREATE TABLE users..."
+              onChange={(v) => setSchema(v || "")}
+              options={{ minimap: { enabled: false }, fontSize: 13 }}
             />
-
-            <label style={styles.label}>
-              2. SQL Input (Press TAB to complete)
-            </label>
-
-            <div style={styles.ghostWrapper}>
-              {/* Ghost */}
-              <textarea
-                ref={ghostRef}
-                value={getGhostText()}
-                readOnly
-                style={{ ...styles.textarea, ...styles.ghost }}
-              />
-
-              {/* Real */}
-              <textarea
-                ref={inputRef}
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                onScroll={handleScroll}
-                onKeyDown={handleKeyDown}
-                style={{ ...styles.textarea, ...styles.real }}
-                placeholder="SELECT * FROM..."
-              />
-            </div>
           </div>
+        </section>
 
-          {/* RIGHT */}
-          <div>
-            <h3>AI Suggestion</h3>
-            <div style={styles.suggestionBox}>
-              {suggestion ? (
-                <pre>
-                  <code>{suggestion}</code>
-                </pre>
-              ) : (
-                "No suggestion..."
-              )}
-            </div>
+        {/* Main SQL Copilot Editor */}
+        <section>
+          <label style={styles.label}>SQL Input (Ghost Text Enabled)</label>
+          <div style={styles.editorWrapper}>
+            <Editor
+              height="400px"
+              defaultLanguage="sql"
+              theme="vs-dark"
+              value={query}
+              onMount={handleEditorDidMount}
+              onChange={(v) => setQuery(v || "")}
+              options={{
+                inlineSuggest: { enabled: true },
+                fontSize: 14,
+                minimap: { enabled: false },
+                suggestOnTriggerCharacters: true,
+                quickSuggestions: true,
+                // Ensures the ghost text doesn't conflict with the standard suggestion widget
+                suggest: {
+                    showMethods: true,
+                    showFunctions: true,
+                }
+              }}
+            />
           </div>
-        </div>
+        </section>
       </div>
     </div>
   );
 };
 
-export default App;
-
 // ---------- STYLES ----------
 const styles: Record<string, React.CSSProperties> = {
-  body: {
-    margin: 0,
-    fontFamily: "system-ui, -apple-system, sans-serif",
-    background: "#0e1117",
-    color: "#fafafa",
-    padding: 20,
-    minHeight: "100vh",
-  },
-  container: {
-    maxWidth: 1200,
-    margin: "0 auto",
-  },
-  grid: {
-    display: "grid",
-    gridTemplateColumns: "1fr 1fr",
-    gap: 30,
-  },
-  label: {
-    display: "block",
-    fontWeight: 600,
-    margin: "15px 0 8px",
-    color: "#e0e0e0",
-  },
-  textarea: {
-    width: "100%",
-    height: 200,
-    background: "#262730",
-    color: "#fafafa",
-    border: "1px solid #444",
-    borderRadius: 6,
-    padding: 12,
-    fontFamily: "monospace",
-    fontSize: 14,
-    lineHeight: 1.5,
-    resize: "none",
-    boxSizing: "border-box",
-    overflow: "hidden",
-    whiteSpace: "pre-wrap",
-    wordWrap: "break-word",
-  },
-  ghostWrapper: {
-    position: "relative",
-  },
-  ghost: {
-    position: "absolute",
-    top: 0,
-    left: 0,
-    zIndex: 1,
-    color: "#555",
-    pointerEvents: "none",
-  },
-  real: {
-    position: "relative",
-    zIndex: 2,
-    background: "transparent",
-    borderColor: "transparent",
-    caretColor: "#4a90e2",
-  },
-  suggestionBox: {
-    background: "#262730",
-    padding: 15,
-    borderRadius: 6,
-    border: "1px solid #444",
-    overflowX: "auto",
-    fontFamily: "monospace",
-    minHeight: 200,
-  },
+  container: { padding: "20px", background: "#0e1117", minHeight: "100vh" },
+  header: { marginBottom: "20px" },
+  grid: { display: "flex", flexDirection: "column", gap: "20px", maxWidth: "1200px", margin: "0 auto" },
+  label: { color: "#e0e0e0", fontSize: "0.9rem", marginBottom: "8px", display: "block" },
+  editorWrapper: { border: "1px solid #333", borderRadius: "8px", overflow: "hidden" }
 };
+
+export default JustQLCopilot;
